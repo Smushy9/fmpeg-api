@@ -1,50 +1,60 @@
-import os, subprocess, uuid, requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, send_file, jsonify
+import subprocess, uuid, requests, os, re
 
 app = Flask(__name__)
 
-@app.route('/create-video', methods=['POST'])
+def normalize_dropbox(url: str) -> str:
+    if "dropbox.com" not in url:
+        return url
+
+    m = re.match(r"https?://www\.dropbox\.com/s/([^/]+)/([^?]+)", url)
+    if m:
+        return f"https://dl.dropboxusercontent.com/s/{m.group(1)}/{m.group(2)}"
+
+    if "dl=0" in url:
+        return url.replace("dl=0", "dl=1")
+    if "dl=1" in url:
+        return url
+
+    return url
+
+@app.route("/")
+def ping():
+    return "FFmpeg-API 🚀"
+
+@app.route("/create-video", methods=["POST"])
 def create_video():
     data = request.get_json(force=True)
     image_url = data.get("image_url")
     audio_url = data.get("audio_url")
-    duration = float(data.get("duration", 15))
-    fade_in = float(data.get("fade_in", 1))
+
+    if not image_url or not audio_url:
+        return jsonify(error="image_url och audio_url krävs"), 400
+
+    audio_url = normalize_dropbox(audio_url)
 
     uid = str(uuid.uuid4())
-    image_path = f"{uid}.jpg"
-    audio_path = f"{uid}.mp3"
-    output_dir = "static"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = f"{output_dir}/{uid}.mp4"
+    img_path    = f"/tmp/{uid}.jpg"
+    audio_path  = f"/tmp/{uid}.mp3"
+    output_path = f"/tmp/{uid}.mp4"
 
-    # Download media
-    with open(image_path, "wb") as f:
+    with open(img_path, "wb") as f:
         f.write(requests.get(image_url).content)
     with open(audio_path, "wb") as f:
         f.write(requests.get(audio_url).content)
 
-    # Build ffmpeg command
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1",
-        "-i", image_path,
+        "-loop", "1", "-i", img_path,
         "-i", audio_path,
-        "-c:v", "libx264",
-        "-t", str(duration),
-        "-pix_fmt", "yuv420p",
-        "-vf", f"fade=t=in:st=0:d={fade_in}",
+        "-c:v", "libx264", "-tune", "stillimage",
+        "-c:a", "aac", "-pix_fmt", "yuv420p",
         "-shortest",
         output_path
     ]
     subprocess.run(cmd, check=True)
 
-    # Clean up inputs
-    os.remove(image_path)
-    os.remove(audio_path)
-
-    video_url = request.host_url.rstrip('/') + '/' + output_path
-    return jsonify({"video_url": video_url})
+    return send_file(output_path, mimetype="video/mp4")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
